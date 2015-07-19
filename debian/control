@@ -1,0 +1,13 @@
+Source: arsoft-web-filewatch
+Section: admin
+Priority: optional
+Maintainer: Andreas Roth <aroth@arsoft-online.com>
+Standards-Version: 3.9.4
+Build-Depends: debhelper (>= 8), python (>= 2.7)
+X-Python-Version: >=2.7
+
+Package: arsoft-web-filewatch
+Architecture: all
+Depends: arsoft-python-web (>= 1.42), ${python:Depends}, ${misc:Depends}
+Description: notify when a file changes
+ This service allows you to configure notification when file on disk changes.

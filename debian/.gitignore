@@ -1,0 +1,8 @@
+
+/arsoft-web-filewatch/
+/*.substvars
+/*.debhelper
+/*.debhelper.log
+/dirs
+/docs
+/files

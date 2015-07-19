@@ -1,0 +1,42 @@
+body {
+    background-color:#FEFEF2;
+    font-family:helvetica, arial, verdana, sans-serif;
+}
+.errormessage { 
+    font-weight:bold;
+    text-align:center;
+    color:red;
+}
+.statusmessage { 
+    font-weight:bold;
+    text-align:center;
+    color:blue;
+}
+.title {
+    text-align:center;
+    font-size:large;
+}
+ul {
+    list-style-type: square;
+    margin: 0px;
+}
+table {
+    border-collapse:collapse;
+}
+tr, th, td, tbody {
+    border-style: inherit;
+    border-color: inherit;
+    border-width: inherit;
+    text-align: left;
+    vertical-align: top;
+    padding:1px 3px 1px 3px;
+}
+
+table.no_border {
+    border-style: none;
+}
+table.small_border {
+    border-style: solid;
+    border-color: black;
+    border-width: 1px;
+}

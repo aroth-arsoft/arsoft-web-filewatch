@@ -1,0 +1,24 @@
+#!/bin/sh -e
+PKG=arsoft-web-filewatch
+
+case "$1" in
+    configure|upgrade)
+        # make sure django log dir exists
+        [ ! -d /var/log/django ] && mkdir /var/log/django
+        /usr/lib/$PKG/manage.py syncdb --noinput
+        #/usr/lib/$PKG/manage.py collectstatic -l --noinput
+        # make sure database is owned by www-data
+        chown www-data:www-data -R /var/lib/arsoft/web/filewatch
+        # an nobody can except www-data can access the database files
+        chmod 0750 /var/lib/arsoft/web/filewatch
+        # ... and create the log file if it does not exist
+        if [ ! -f /var/log/django/arsoft.web.filewatch.log ]; then
+            touch /var/log/django/arsoft.web.filewatch.log
+            chown www-data:www-data /var/log/django/arsoft.web.filewatch.log
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

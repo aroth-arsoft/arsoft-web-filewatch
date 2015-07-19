@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+{% load static_url %}
+<link rel="stylesheet" type="text/css" href="{% static_url "main.css" %}" />
+<title>{{ title }}</title>
+</head>
+<body>
+<h1 class="title">{{ title }}</h1>
+
+{% for config in config_list %}
+{% if config.server  %}
+<h2>{{ config.name }} (Server)</h2>
+{% else  %}
+<h2>{{ config.name }} (Client)</h2>
+{% endif %}
+<table class="small_border">
+<tr><td>Config file</td><td>{{ config.filename }}</td></tr>
+<tr><td>Running</td><td>{{ config.is_running }}</td></tr>
+<tr><td>Auto-start</td><td>{{ config.autostart }}</td></tr>
+<tr><td>State</td><td>{{ config.connection_state }}</td></tr>
+<tr><td>Status file</td><td>{{ config.status_file }} (version {{ config.status_version }})</td></tr>
+<tr><td>Log file</td><td>{{ config.logfile }}</td></tr>
+<tr><td>Certificate</td><td>
+
+<table class="no_border">
+<tr><td>Filename</td><td>{{ config.certificate.filename }}</td></tr>
+<tr><td>Subject</td><td>{{ config.certificate.subject }}</td></tr>
+<tr><td>Issuer</td><td>{{ config.certificate.issuer }}</td></tr>
+<tr><td>Expire date</td><td>{{ config.certificate.expire_date }}</td></tr>
+</table>
+</td></tr>
+
+<tr><td>Configured routes</td><td><ul>
+{% for route in config.routes %}
+<li>{{ route }}</li>
+{% endfor %}
+</ul></td></tr>
+
+{% if config.server  %}
+<tr><td>Active routes</td><td><ul>
+{% for route in config.routing_table %}
+<li>{{ route }}</li>
+{% endfor %}
+</ul></td></tr>
+{% endif %}
+
+{% if config.server  %}
+<tr><td>CCD</td><td>{{ config.config_file.client_config_directory }}</td></tr>
+
+<tr><td>Configured clients</td><td><ul>
+{% for client in config.configured_clients %}
+<li>{{ client }}</li>
+{% endfor %}
+</ul></td></tr>
+
+<tr><td>Connected clients</td><td><ul>
+{% for client in config.connected_clients %}
+<li>{{ client }}</li>
+{% endfor %}
+</ul></td></tr>
+
+
+{% endif %}
+</table>
+{% endfor %}
+
+</body>
+</html>
