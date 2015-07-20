@@ -1,9 +1,9 @@
 from django.template import RequestContext, Template, Context, loader
 from django.core.urlresolvers import reverse
 from django.http import HttpResponse
-from arsoft.web.filewatch.models import FileWatchModel, FileWatchItemModel
+from arsoft.web.filewatch.models import FileWatchModel, FileWatchItemModel, FileWatchItemFromDisk
 
-import os
+import os, stat
 from datetime import datetime
 from arsoft.timestamp import timestamp_from_datetime
 
@@ -17,69 +17,95 @@ def home(request):
 
     t = loader.get_template('home.html')
     c = RequestContext( request, { 
-        'config_list':hub.list(),
-        'title':title
+        'title':'home'
         })
     return HttpResponse(t.render(c))
 
 
+def _get_files_recursive(filename):
+    ret = []
+    files = []
+    try:
+        files = os.listdir(filename)
+    except OSError:
+        pass
+    for f in files:
+        if f == '.' or f == '..':
+            continue
+        full = os.path.join(filename, f)
+        s = os.stat(full)
+        if stat.S_ISDIR(s.st_mode):
+            subdir_files = _get_files_recursive(full)
+            ret.extend(subdir_files)
+        elif stat.S_ISREG(s.st_mode):
+            ret.append( FileWatchItemFromDisk(full, s) )
+    return ret
 
 def _check_item(item):
+    ret = []
+
     files_in_db = []
+    files_on_disk = []
+
     try:
         files_in_db = FileWatchItemModel.objects.filter(watchid=item.id)
     except FileWatchItemModel.DoesNotExist:
         pass
-    files_on_disc = []
+    
+    # expect all files from DB to be found on disk
+    missing_files_from_db = []
+    for db_item in files_in_db:
+        missing_files_from_db.append(db_item.filename)
 
-    ret = []
     if os.path.exists(item.filename):
-        if os.path.isdir(item.filename):
-            for f in os.listdir(item.filename):
-                full = os.path.join(item.filename, f)
-                s = os.stat(full)
-                files_on_disc.append( (full, s))
+        if os.path.isdir(item.filename) and item.recursive:
+            files_on_disk = _get_files_recursive(item.filename)
         else:
             s = os.stat(item.filename)
-            files_on_disc.append( (item.filename, s))
-    logger.warning('_check_item %s: %s<>%s' % (item.filename, files_on_disc, files_in_db))
-    for (filename, s) in files_on_disc:
+            files_on_disk.append( FileWatchItemFromDisk(item.filename, s))
+    logger.warning('_check_item %s: %s<>%s' % (item.filename, files_on_disk, files_in_db))
+    
+    for disk_item in files_on_disk:
         found = False
         for db_item in files_in_db:
-            if db_item.filename == filename:
+            if db_item.filename == disk_item.filename:
                 found = True
                 break
         changes = []
         if not found:
-            created = datetime.utcfromtimestamp(s.st_ctime)
-            modified = datetime.utcfromtimestamp(s.st_mtime)
-            uid = s.st_uid
-            gid = s.st_gid
-            mode = s.st_mode
-
             model = FileWatchItemModel.objects.create(watchid=item, 
-                                                      filename=filename, 
-                                                      created=created,
-                                                      modified=modified,
-                                                      uid=uid,
-                                                      gid=gid,
-                                                      mode=mode
+                                                      filename=disk_item.filename, 
+                                                      created=disk_item.created,
+                                                      modified=disk_item.modified,
+                                                      uid=disk_item.uid,
+                                                      gid=disk_item.gid,
+                                                      mode=disk_item.mode,
+                                                      size=disk_item.size
                                                       )
             changes.append( 'File added' )
         else:
-            if s.st_ctime > timestamp_from_datetime(db_item.created):
-                changes.append( 'Create time changed from %s to %s' % (db_item.created.strftime('%c'), s.st_ctime) )
-            if s.st_mtime > timestamp_from_datetime(db_item.modified):
-                changes.append( 'Modification time changed from %s to %s' % (db_item.modified.strftime('%c'), s.st_mtime) )
-            if s.st_uid != db_item.uid:
-                changes.append( 'Owner changed from %i to %i' % (db_item.uid, s.st_uid) )
-            if s.st_gid != db_item.gid:
-                changes.append( 'Group changed from %i to %i' % (db_item.gid, s.st_gid) )
-            if s.st_mode != db_item.mode:
-                changes.append( 'Mode changed from %o to %o' % (db_item.mode, s.st_mode) )
-        logger.warning('check file %s' % filename)
+            missing_files_from_db.remove(db_item.filename)
+
+            logger.error('%s %s' % (disk_item.filename, disk_item.created))
+            logger.error('%s %s' % (db_item.filename, db_item.created))
+            if disk_item.created != db_item.created:
+                changes.append( 'Create time changed from %s to %s' % (db_item.created.strftime('%c'), disk_item.created.strftime('%c')) )
+            if disk_item.modified != db_item.modified:
+                changes.append( 'Modification time changed from %s to %s' % (db_item.modified.strftime('%c'), disk_item.modified.strftime('%c')) )
+            if disk_item.uid != db_item.uid:
+                changes.append( 'Owner changed from %i to %i' % (db_item.uid, disk_item.uid) )
+            if disk_item.gid != db_item.gid:
+                changes.append( 'Group changed from %i to %i' % (db_item.gid, disk_item.gid) )
+            if disk_item.mode != db_item.mode:
+                changes.append( 'Mode changed from %o to %o' % (db_item.mode, disk_item.mode) )
+            if disk_item.size != db_item.size:
+                changes.append( 'Size changed from %o to %o' % (db_item.size, disk_item.size) )
+        
         if changes:
-            ret.append( (filename, changes) )
+            ret.append( (disk_item.filename, changes) )
+    for f in missing_files_from_db:
+        changes = ['File deleted']
+        ret.append( (f, changes) )
     return ret
 
 def check(request):
