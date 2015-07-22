@@ -1,6 +1,7 @@
 from django.db import models
 from django import forms
 from datetime import datetime
+from arsoft.timestamp import utc_timestamp_to_datetime
 
 class FileWatchModel(models.Model):
     filename = models.CharField('Filename', max_length=512, unique=True, help_text='Enter full path for a file/directory to watch')
@@ -35,8 +36,8 @@ class FileWatchItemModel(models.Model):
 class FileWatchItemFromDisk(object):
     def __init__(self, filename, file_stats):
         self.filename = filename
-        self.created = datetime.fromtimestamp(file_stats.st_ctime)
-        self.modified = datetime.fromtimestamp(file_stats.st_mtime)
+        self.created = utc_timestamp_to_datetime(file_stats.st_ctime)
+        self.modified = utc_timestamp_to_datetime(file_stats.st_mtime)
         self.uid = file_stats.st_uid
         self.gid = file_stats.st_gid
         self.mode = file_stats.st_mode

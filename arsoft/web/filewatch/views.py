@@ -5,7 +5,7 @@ from arsoft.web.filewatch.models import FileWatchModel, FileWatchItemModel, File
 
 import os, stat
 from datetime import datetime
-from arsoft.timestamp import timestamp_from_datetime
+from arsoft.timestamp import timestamp_from_datetime, as_local_time
 
 # import the logging library
 import logging
@@ -42,7 +42,8 @@ def _get_files_recursive(filename):
     return ret
 
 def _check_item(item):
-    ret = []
+    ret_changed = []
+    ret_unchanged = []
 
     files_in_db = []
     files_on_disk = []
@@ -55,7 +56,7 @@ def _check_item(item):
     # expect all files from DB to be found on disk
     missing_files_from_db = []
     for db_item in files_in_db:
-        missing_files_from_db.append(db_item.filename)
+        missing_files_from_db.append(db_item)
 
     if os.path.exists(item.filename):
         if os.path.isdir(item.filename) and item.recursive:
@@ -63,7 +64,6 @@ def _check_item(item):
         else:
             s = os.stat(item.filename)
             files_on_disk.append( FileWatchItemFromDisk(item.filename, s))
-    logger.warning('_check_item %s: %s<>%s' % (item.filename, files_on_disk, files_in_db))
     
     for disk_item in files_on_disk:
         found = False
@@ -84,41 +84,62 @@ def _check_item(item):
                                                       )
             changes.append( 'File added' )
         else:
-            missing_files_from_db.remove(db_item.filename)
+            missing_files_from_db.remove(db_item)
 
-            logger.error('%s %s' % (disk_item.filename, disk_item.created))
-            logger.error('%s %s' % (db_item.filename, db_item.created))
+            #logger.error('%s %s, %s' % (disk_item.filename, disk_item.created, as_local_time(disk_item.created)))
+            #logger.error('%s %s, %s' % (db_item.filename, db_item.created, as_local_time(db_item.created)))
+            db_item_dirty = False
             if disk_item.created != db_item.created:
-                changes.append( 'Create time changed from %s to %s' % (db_item.created.strftime('%c'), disk_item.created.strftime('%c')) )
+                changes.append( 'Create time changed from %s to %s' % (as_local_time(db_item.created), as_local_time(disk_item.created)) )
+                db_item.created = disk_item.created
+                db_item_dirty = True
             if disk_item.modified != db_item.modified:
-                changes.append( 'Modification time changed from %s to %s' % (db_item.modified.strftime('%c'), disk_item.modified.strftime('%c')) )
+                changes.append( 'Modification time changed from %s to %s' % (as_local_time(db_item.modified), as_local_time(disk_item.modified)) )
+                db_item.modified = disk_item.modified
+                db_item_dirty = True
             if disk_item.uid != db_item.uid:
                 changes.append( 'Owner changed from %i to %i' % (db_item.uid, disk_item.uid) )
+                db_item.uid = disk_item.uid
+                db_item_dirty = True
             if disk_item.gid != db_item.gid:
                 changes.append( 'Group changed from %i to %i' % (db_item.gid, disk_item.gid) )
+                db_item.gid = disk_item.gid
+                db_item_dirty = True
             if disk_item.mode != db_item.mode:
                 changes.append( 'Mode changed from %o to %o' % (db_item.mode, disk_item.mode) )
+                db_item.mode = disk_item.mode
+                db_item_dirty = True
             if disk_item.size != db_item.size:
                 changes.append( 'Size changed from %o to %o' % (db_item.size, disk_item.size) )
-        
+                db_item.size = disk_item.size
+                db_item_dirty = True
+            if db_item_dirty:
+                db_item.save()
+            else:
+                ret_unchanged.append( (db_item.filename, []) )
+
         if changes:
-            ret.append( (disk_item.filename, changes) )
-    for f in missing_files_from_db:
+            ret_changed.append( (disk_item.filename, changes) )
+    for db_item in missing_files_from_db:
         changes = ['File deleted']
-        ret.append( (f, changes) )
-    return ret
+        ret_changed.append( (db_item.filename, changes) )
+        FileWatchItemModel.objects.delete(db_item)
+    return (ret_changed, ret_unchanged)
 
 def check(request):
     
-    change_list = []
+    changed_list = []
+    unchanged_list = []
     for item in FileWatchModel.objects.all():
-        item_change_list = _check_item(item)
+        item_changed_list, item_unchanged_list = _check_item(item)
         
-        change_list.extend(item_change_list)
+        changed_list.extend(item_changed_list)
+        unchanged_list.extend(item_unchanged_list)
    
     t = Template(FILEWATCH_CHECK_VIEW_TEMPLATE, name='check view template')
     c = RequestContext( request, { 
-        'change_list':change_list,
+        'changed_list':changed_list,
+        'unchanged_list':unchanged_list,
         })
     return HttpResponse(t.render(c))
 
@@ -226,9 +247,26 @@ FILEWATCH_CHECK_VIEW_TEMPLATE = """
       </tr>
     </table>
   </div>
-  <div id="info">
+  <div id="changed">
+    <p>Changed files</p>
       <ol>
-        {% for item in change_list %}
+        {% for item in changed_list %}
+          <li>
+            {{ item.0 }}
+            <ol>
+                {% for change_item in item.1 %}
+                    <li>{{change_item}}</li>
+                {% endfor %}
+            </ol>
+            
+          </li>
+        {% endfor %}
+      </ol>
+  </div>
+  <div id="unchanged">
+    <p>Unchanged files</p>
+      <ol>
+        {% for item in unchanged_list %}
           <li>
             {{ item.0 }}
             <ol>
