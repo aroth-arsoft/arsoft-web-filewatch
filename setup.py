@@ -14,5 +14,6 @@ setup(name='arsoft-web-filewatch',
 		data_files=[
             ('/etc/arsoft/web/filewatch/static', ['arsoft/web/filewatch/static/main.css']),
             ('/etc/arsoft/web/filewatch/templates', ['arsoft/web/filewatch/templates/home.html']),
+            ('/usr/lib/arsoft-web-filewatch', ['manage.py']),
             ]
 		)
