@@ -18,7 +18,7 @@ MIDDLEWARE_CLASSES.append('django.contrib.auth.middleware.AuthenticationMiddlewa
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': os.path.join(APP_DATA_DIR, 'ddns.db')
+        'NAME': os.path.join(APP_DATA_DIR, 'filewatch.db')
     }
 }
 
@@ -28,3 +28,9 @@ SECRET_KEY = '}zxYtIXN]A6w~|f!;[\jTl*uN$Dwc/Q;b}CI~P|Jh<|?#keD`>VbxRMFrOZ*9xS'
 # Disable the host verification in the web application. This test must be
 # done in the web server itself.
 ALLOWED_HOSTS = ['*']
+
+EMAIL_SUBJECT_FORMAT = '[FILEWATCH]: %(filename)s changed (%(num_changed)i changed, %(num_unchanged)i unchanged)'
+EMAIL_SENDER = 'root@localhost'
+EMAIL_BACKEND = 'arsoft.web.backends.SendmailBackend'
+
+REPORT_UNCHANGED = False

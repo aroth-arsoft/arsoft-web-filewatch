@@ -9,6 +9,7 @@ class FileWatchForm(forms.ModelForm):
 
 class FileWatchAdmin(admin.ModelAdmin):
 
+    list_display = ('filename', 'recursive', 'notify')
     fields = ['filename', 'recursive', 'notify']
     form = FileWatchForm
 

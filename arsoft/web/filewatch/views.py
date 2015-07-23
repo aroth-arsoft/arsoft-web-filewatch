@@ -1,6 +1,8 @@
 from django.template import RequestContext, Template, Context, loader
 from django.core.urlresolvers import reverse
 from django.http import HttpResponse
+from django.core.mail import send_mail
+from django.conf import settings
 from arsoft.web.filewatch.models import FileWatchModel, FileWatchItemModel, FileWatchItemFromDisk
 
 import os, stat
@@ -21,6 +23,18 @@ def home(request):
         })
     return HttpResponse(t.render(c))
 
+
+def _get_request_param(request, paramname, default_value=None):
+    if paramname in request.GET:
+        if isinstance(default_value, int):
+            ret = int(request.GET[paramname])
+        elif isinstance(default_value, str) or isinstance(default_value, unicode):
+            ret = str(request.GET[paramname])
+        else:
+            ret = request.GET[paramname]
+    else:
+        ret = default_value
+    return ret
 
 def _get_files_recursive(filename):
     ret = []
@@ -126,22 +140,82 @@ def _check_item(item):
         FileWatchItemModel.objects.delete(db_item)
     return (ret_changed, ret_unchanged)
 
+def _send_email_notifications(request, item, check_result):
+    changed_list, unchanged_list = check_result
+    
+    if not changed_list:
+        return None
+    
+    stat_dict = { 
+                'filename': item.filename, 
+                'num_files': len(changed_list) + len(unchanged_list),
+                'num_changed': len(changed_list), 
+                'num_unchanged': len(unchanged_list) 
+                }
+    
+    subject = settings.EMAIL_SUBJECT_FORMAT % stat_dict
+    from_email = settings.EMAIL_SENDER
+    recipient_list = []
+    if isinstance(item.notify, list):
+        recipient_list.extend(item.notify)
+    elif ';' in item.notify:
+        recipient_list.extend(item.notify.split(';'))
+    else:
+        recipient_list.append(item.notify)
+
+    t = Template(FILEWATCH_CHECK_VIEW_TEMPLATE, name='check view template')
+    c = RequestContext( request, { 
+        'request':request,
+        'item':item,
+        'filename': item.filename, 
+        'num_files': len(changed_list) + len(unchanged_list),
+        'num_changed': len(changed_list), 
+        'num_unchanged': len(unchanged_list),
+        'changed_list':changed_list,
+        'unchanged_list':unchanged_list,
+        'report_unchanged': settings.REPORT_UNCHANGED,
+        })
+    send_mail(subject=subject, from_email=from_email, recipient_list=recipient_list, message='', html_message=t.render(c), fail_silently=False)
+    return True
+
 def check(request):
     
+    verbose = _get_request_param(request, 'verbose', 0)
+    
+    response_status = 200
+    response_data = ''
     changed_list = []
     unchanged_list = []
+    num_mails_ok = 0
+    num_mails_failed = 0
     for item in FileWatchModel.objects.all():
         item_changed_list, item_unchanged_list = _check_item(item)
         
+        ret = _send_email_notifications(request, item, (item_changed_list, item_unchanged_list) )
+        if ret is not None:
+            if ret:
+                num_mails_ok += 1
+            else:
+                num_mails_failed += 1
+        
         changed_list.extend(item_changed_list)
         unchanged_list.extend(item_unchanged_list)
-   
-    t = Template(FILEWATCH_CHECK_VIEW_TEMPLATE, name='check view template')
-    c = RequestContext( request, { 
-        'changed_list':changed_list,
-        'unchanged_list':unchanged_list,
-        })
-    return HttpResponse(t.render(c))
+    if verbose:
+        t = Template(FILEWATCH_CHECK_VIEW_TEMPLATE, name='check view template')
+        c = RequestContext( request, { 
+            'request':request,
+            'num_mails_ok':num_mails_ok,
+            'num_mails_failed':num_mails_failed,
+            'num_files': len(changed_list) + len(unchanged_list),
+            'num_changed': len(changed_list), 
+            'num_unchanged': len(unchanged_list),
+            'changed_list':changed_list,
+            'unchanged_list':unchanged_list,
+            'report_unchanged': settings.REPORT_UNCHANGED,
+            })
+        return HttpResponse(t.render(c), status=response_status)
+    else:
+        return HttpResponse(response_data, status=response_status, content_type="text/plain")        
 
 
 FILEWATCH_CHECK_VIEW_TEMPLATE = """
@@ -153,7 +227,11 @@ FILEWATCH_CHECK_VIEW_TEMPLATE = """
 <html lang="en">
 <head>
   <meta http-equiv="content-type" content="text/html; charset=utf-8">
-  <title>URL handler info</title>
+  {% if filename %}
+  <title>Filewatch report for {{ filename }}</title>
+  {% else %}
+  <title>Filewatch report</title>
+  {% endif %}
   <meta name="robots" content="NONE,NOARCHIVE">
   <style type="text/css">
     html * { padding:0; margin:0; }
@@ -166,87 +244,50 @@ FILEWATCH_CHECK_VIEW_TEMPLATE = """
     table { border:none; border-collapse: collapse; width:100%; }
     td, th { vertical-align:top; padding:2px 3px; }
     th { width:12em; text-align:right; color:#666; padding-right:.5em; }
-    #info { background:#f6f6f6; }
-    #info ol { margin: 0.5em 4em; }
-    #info ol li { font-family: monospace; }
+    #changed { background:#f6f6f6; }
+    #changed ol { margin: 0.5em 4em; }
+    #changed ol li { font-family: monospace; }
+    #unchanged { background:#f6f6f6; }
+    #unchanged ol { margin: 0.5em 4em; }
+    #unchanged ol li { font-family: monospace; }
     #summary { background: #ffc; }
     #explanation { background:#eee; border-bottom: 0px none; }
   </style>
 </head>
 <body>
   <div id="summary">
-    <h1>URL handler info</h1>
+  {% if filename %}
+  <h1>Filewatch report for {{ filename }}</h1>
+  {% else %}
+  <h1>Filewatch report</h1>
+  {% endif %}
     <table class="meta">
-      <tr>
-        <th>Request Method:</th>
-        <td>{{ request.META.REQUEST_METHOD }}</td>
-      </tr>
-      <tr>
-        <th>Request URL:</th>
-        <td>{{ request.build_absolute_uri|escape }}</td>
-      </tr>
+  {% if filename %}
     <tr>
-      <th>Script prefix:</th>
-      <td><pre>{{ script_prefix|escape }}</pre></td>
+      <th>Filename:</th>
+      <td><pre>{{ filename }}</pre></td>
+    </tr>
+  {% else %}
+    <tr>
+      <th>Number of mails:</th>
+      <td>{{ num_mails_ok }} ok / {{ num_mails_failed }} failed</td>
+    </tr>
+  {% endif %}
+    <tr>
+      <th>Total number of files:</th>
+      <td>{{ num_files }}</td>
     </tr>
     <tr>
-      <th>Base URL:</th>
-      <td><pre>{% base_url %}</pre></td>
+      <th>Changed files:</th>
+      <td>{{ num_changed }}</td>
     </tr>
     <tr>
-      <th>Static URL:</th>
-      <td><pre>{% static_url %}</pre></td>
+      <th>Unchanged files:</th>
+      <td>{{ num_unchanged }}</td>
     </tr>
-    <tr>
-      <th>Media URL:</th>
-      <td><pre>{% media_url %}</pre></td>
-    </tr>
-      <tr>
-        <th>Django Version:</th>
-        <td>{{ django_version_info }}</td>
-      </tr>
-      <tr>
-        <th>Python Version:</th>
-        <td>{{ sys_version_info }}</td>
-      </tr>
-    <tr>
-      <th>Python Executable:</th>
-      <td>{{ sys_executable|escape }}</td>
-    </tr>
-    <tr>
-      <th>Python Version:</th>
-      <td>{{ sys_version_info }}</td>
-    </tr>
-    <tr>
-      <th>Python Path:</th>
-      <td><pre>{{ sys_path|pprint }}</pre></td>
-    </tr>
-    <tr>
-      <th>Server time:</th>
-      <td>{{server_time|date:"r"}}</td>
-    </tr>
-      <tr>
-        <th>Installed Applications:</th>
-        <td><ul>
-          {% for item in settings.INSTALLED_APPS %}
-            <li><code>{{ item }}</code></li>
-          {% endfor %}
-        </ul></td>
-      </tr>
-      <tr>
-        <th>Installed Middleware:</th>
-        <td><ul>
-          {% for item in settings.MIDDLEWARE_CLASSES %}
-            <li><code>{{ item }}</code></li>
-          {% endfor %}
-        </ul></td>
-      </tr>
-      <tr>
-        <th>settings module:</th>
-        <td><code>{{ settings.SETTINGS_MODULE }}</code></td>
-      </tr>
     </table>
   </div>
+{% if num_changed != 0 %}
   <div id="changed">
     <p>Changed files</p>
       <ol>
@@ -263,6 +304,8 @@ FILEWATCH_CHECK_VIEW_TEMPLATE = """
         {% endfor %}
       </ol>
   </div>
+{% endif %}
+{% if report_unchanged and num_unchanged != 0 %}
   <div id="unchanged">
     <p>Unchanged files</p>
       <ol>
@@ -279,10 +322,10 @@ FILEWATCH_CHECK_VIEW_TEMPLATE = """
         {% endfor %}
       </ol>
   </div>
-
+{% endif %}
   <div id="explanation">
     <p>
-      This page contains information to investigate issues with this web application.
+      This report was automatically generated. Please do not respond to this mail.
     </p>
   </div>
 </body>

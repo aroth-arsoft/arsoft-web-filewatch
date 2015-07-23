@@ -7,3 +7,13 @@ DEB_COMPRESS_EXCLUDE := .py
 
 %:
 	dh $@ --buildsystem=python_distutils --with=python2
+
+override_dh_clean:
+	dh_clean -O--buildsystem=python_distutils
+	rm data/* || true
+
+override_dh_auto_install:
+	dh_auto_install -O--buildsystem=python_distutils
+	install -o www-data -g www-data -m 0750 -d $(CURDIR)/debian/arsoft-web-filewatch/var/lib/arsoft/web/filewatch
+	install -m 0755 -d $(CURDIR)/debian/arsoft-web-filewatch/etc/arsoft/web/filewatch/static
+	ln -s /usr/lib/python2.7/dist-packages/django/contrib/admin/static/admin $(CURDIR)/debian/arsoft-web-filewatch/etc/arsoft/web/filewatch/static/admin
