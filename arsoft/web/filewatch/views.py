@@ -1,3 +1,7 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+# kate: space-indent on; indent-width 4; mixedindent off; indent-mode python;
+
 from django.template import RequestContext, Template, Context, loader
 from django.core.urlresolvers import reverse
 from django.http import HttpResponse
@@ -5,6 +9,7 @@ from django.core.mail import send_mail
 from django.conf import settings
 from arsoft.web.filewatch.models import FileWatchModel, FileWatchItemModel, FileWatchItemFromDisk
 
+import sys
 import os, stat
 from datetime import datetime
 from arsoft.timestamp import timestamp_from_datetime, as_local_time
@@ -39,17 +44,18 @@ def _get_request_param(request, paramname, default_value=None):
 def _get_files_recursive(filename):
     ret = []
     files = []
-    filename = filename.decode('utf-8')
     try:
         files = os.listdir(filename)
     except OSError:
         pass
+    enc = sys.getfilesystemencoding()
     for f in files:
-	f = f.decode('utf-8')
         if f == '.' or f == '..':
             continue
-        full = os.path.join(filename, f)
-	full = full.decode('utf-8')
+        try:
+            full = os.path.join(filename, f)
+        except UnicodeDecodeError as e:
+            raise Exception('failure at %s: %s-%s, %s' % (enc, filename, f.decode('utf8'), e))
         s = os.stat(full)
         if stat.S_ISDIR(s.st_mode):
             subdir_files = _get_files_recursive(full)
@@ -75,13 +81,12 @@ def _check_item(item):
     for db_item in files_in_db:
         missing_files_from_db.append(db_item)
 
-    filename = item.filename.decode('utf8')
-    if os.path.exists(filename):
-        if os.path.isdir(filename) and item.recursive:
-            files_on_disk = _get_files_recursive(filename)
+    if os.path.exists(item.filename):
+        if os.path.isdir(item.filename) and item.recursive:
+            files_on_disk = _get_files_recursive(item.filename)
         else:
-            s = os.stat(filename)
-            files_on_disk.append( FileWatchItemFromDisk(filename, s))
+            s = os.stat(item.filename)
+            files_on_disk.append( FileWatchItemFromDisk(item.filename, s))
     
     for disk_item in files_on_disk:
         found = False

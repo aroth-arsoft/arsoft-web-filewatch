@@ -1,3 +1,7 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+# kate: space-indent on; indent-width 4; mixedindent off; indent-mode python;
+
 from django.contrib import admin
 from django import forms
 from arsoft.web.filewatch.models import FileWatchModel
