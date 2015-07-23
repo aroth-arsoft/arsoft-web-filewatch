@@ -39,14 +39,17 @@ def _get_request_param(request, paramname, default_value=None):
 def _get_files_recursive(filename):
     ret = []
     files = []
+    filename = filename.decode('utf-8')
     try:
         files = os.listdir(filename)
     except OSError:
         pass
     for f in files:
+	f = f.decode('utf-8')
         if f == '.' or f == '..':
             continue
         full = os.path.join(filename, f)
+	full = full.decode('utf-8')
         s = os.stat(full)
         if stat.S_ISDIR(s.st_mode):
             subdir_files = _get_files_recursive(full)
@@ -72,12 +75,13 @@ def _check_item(item):
     for db_item in files_in_db:
         missing_files_from_db.append(db_item)
 
-    if os.path.exists(item.filename):
-        if os.path.isdir(item.filename) and item.recursive:
-            files_on_disk = _get_files_recursive(item.filename)
+    filename = item.filename.decode('utf8')
+    if os.path.exists(filename):
+        if os.path.isdir(filename) and item.recursive:
+            files_on_disk = _get_files_recursive(filename)
         else:
-            s = os.stat(item.filename)
-            files_on_disk.append( FileWatchItemFromDisk(item.filename, s))
+            s = os.stat(filename)
+            files_on_disk.append( FileWatchItemFromDisk(filename, s))
     
     for disk_item in files_on_disk:
         found = False
