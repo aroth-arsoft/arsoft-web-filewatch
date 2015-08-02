@@ -4,13 +4,18 @@
 
 from django.template import RequestContext, Template, Context, loader
 from django.core.urlresolvers import reverse
-from django.http import HttpResponse
+from django.http import HttpResponse, StreamingHttpResponse
 from django.core.mail import send_mail
 from django.conf import settings
 from arsoft.web.filewatch.models import FileWatchModel, FileWatchItemModel, FileWatchItemFromDisk
+from django.db import transaction
 
 import sys
 import os, stat
+try:
+    from StringIO import StringIO
+except ImportError:
+    from io import StringIO
 from datetime import datetime
 from arsoft.timestamp import timestamp_from_datetime, as_local_time
 
@@ -56,176 +61,236 @@ def _get_files_recursive(filename):
             full = os.path.join(filename, f)
         except UnicodeDecodeError as e:
             raise Exception('failure at %s: %s-%s, %s' % (enc, filename, f.decode('utf8'), e))
-        s = os.stat(full)
-        if stat.S_ISDIR(s.st_mode):
-            subdir_files = _get_files_recursive(full)
-            ret.extend(subdir_files)
-        elif stat.S_ISREG(s.st_mode):
-            ret.append( FileWatchItemFromDisk(full, s) )
+        try:
+            s = os.stat(full)
+            if stat.S_ISDIR(s.st_mode):
+                subdir_files = _get_files_recursive(full)
+                ret.extend(subdir_files)
+            elif stat.S_ISREG(s.st_mode):
+                ret.append( FileWatchItemFromDisk(full, s) )
+        except FileNotFoundError:
+            pass
     return ret
 
-def _check_item(item):
-    ret_changed = []
-    ret_unchanged = []
+class CheckItemHandler(object):
+    def __init__(self, request=None, item_id=None, verbose=False, notify=True):
+        self._pos = 0
+        self._request = request
+        self._item_id = item_id
+        self._verbose = verbose
+        self._notify = notify
+        self._handler_list = [ self._send_header, 
+                              self._load_disk_files, 
+                              self._load_db_files, 
+                              self._compare_files,
+                              self._send_email_notifications, 
+                              self._send_footer ]
+        self._result_item_list = []
+        
+    class ResultItem(object):
+        def __init__(self, item):
+            self.changed_list = []
+            self.unchanged_list = []
+            self.files_on_disk = []
+            self.files_in_db = []
+            self.item = item
 
-    files_in_db = []
-    files_on_disk = []
+        @property
+        def id(self):
+            return self.item.id
 
-    try:
-        files_in_db = FileWatchItemModel.objects.filter(watchid=item.id)
-    except FileWatchItemModel.DoesNotExist:
-        pass
-    
-    # expect all files from DB to be found on disk
-    missing_files_from_db = []
-    for db_item in files_in_db:
-        missing_files_from_db.append(db_item)
+        @property
+        def filename(self):
+            return self.item.filename
 
-    if os.path.exists(item.filename):
-        if os.path.isdir(item.filename) and item.recursive:
-            files_on_disk = _get_files_recursive(item.filename)
-        else:
-            s = os.stat(item.filename)
-            files_on_disk.append( FileWatchItemFromDisk(item.filename, s))
-    
-    for disk_item in files_on_disk:
-        found = False
-        for db_item in files_in_db:
-            if db_item.filename == disk_item.filename:
-                found = True
-                break
-        changes = []
-        if not found:
-            model = FileWatchItemModel.objects.create(watchid=item, 
-                                                      filename=disk_item.filename, 
-                                                      created=disk_item.created,
-                                                      modified=disk_item.modified,
-                                                      uid=disk_item.uid,
-                                                      gid=disk_item.gid,
-                                                      mode=disk_item.mode,
-                                                      size=disk_item.size
-                                                      )
-            changes.append( 'File added' )
-        else:
-            missing_files_from_db.remove(db_item)
-
-            #logger.error('%s %s, %s' % (disk_item.filename, disk_item.created, as_local_time(disk_item.created)))
-            #logger.error('%s %s, %s' % (db_item.filename, db_item.created, as_local_time(db_item.created)))
-            db_item_dirty = False
-            if disk_item.created != db_item.created:
-                changes.append( 'Create time changed from %s to %s' % (as_local_time(db_item.created), as_local_time(disk_item.created)) )
-                db_item.created = disk_item.created
-                db_item_dirty = True
-            if disk_item.modified != db_item.modified:
-                changes.append( 'Modification time changed from %s to %s' % (as_local_time(db_item.modified), as_local_time(disk_item.modified)) )
-                db_item.modified = disk_item.modified
-                db_item_dirty = True
-            if disk_item.uid != db_item.uid:
-                changes.append( 'Owner changed from %i to %i' % (db_item.uid, disk_item.uid) )
-                db_item.uid = disk_item.uid
-                db_item_dirty = True
-            if disk_item.gid != db_item.gid:
-                changes.append( 'Group changed from %i to %i' % (db_item.gid, disk_item.gid) )
-                db_item.gid = disk_item.gid
-                db_item_dirty = True
-            if disk_item.mode != db_item.mode:
-                changes.append( 'Mode changed from %o to %o' % (db_item.mode, disk_item.mode) )
-                db_item.mode = disk_item.mode
-                db_item_dirty = True
-            if disk_item.size != db_item.size:
-                changes.append( 'Size changed from %o to %o' % (db_item.size, disk_item.size) )
-                db_item.size = disk_item.size
-                db_item_dirty = True
-            if db_item_dirty:
-                db_item.save()
+        @property
+        def recipient_list(self):
+            if isinstance(self.item.notify, list):
+                return self.item.notify
+            elif ';' in self.item.notify:
+                return self.item.notify.split(';')
             else:
-                ret_unchanged.append( (db_item.filename, []) )
+                return [ self.item.notify ]
 
-        if changes:
-            ret_changed.append( (disk_item.filename, changes) )
-    for db_item in missing_files_from_db:
-        changes = ['File deleted']
-        ret_changed.append( (db_item.filename, changes) )
-        FileWatchItemModel.objects.delete(db_item)
-    return (ret_changed, ret_unchanged)
 
-def _send_email_notifications(request, item, check_result):
-    changed_list, unchanged_list = check_result
-    
-    if not changed_list:
-        return None
-    
-    stat_dict = { 
-                'filename': item.filename, 
-                'num_files': len(changed_list) + len(unchanged_list),
-                'num_changed': len(changed_list), 
-                'num_unchanged': len(unchanged_list) 
-                }
-    
-    subject = settings.EMAIL_SUBJECT_FORMAT % stat_dict
-    from_email = settings.EMAIL_SENDER
-    recipient_list = []
-    if isinstance(item.notify, list):
-        recipient_list.extend(item.notify)
-    elif ';' in item.notify:
-        recipient_list.extend(item.notify.split(';'))
-    else:
-        recipient_list.append(item.notify)
+    def _send_header(self):
+        if self._item_id:
+            yield 'begin: check item %i\r\n' % self._item_id
+        else:
+            yield 'begin: check all items\r\n'
+        
+    def _send_footer(self):
+        if self._item_id:
+            yield 'complete: check item %i\r\n' % self._item_id
+        else:
+            yield 'complete: check all items\r\n'
+        
+    def _load_disk_files(self):
 
-    t = Template(FILEWATCH_CHECK_VIEW_TEMPLATE, name='check view template')
-    c = RequestContext( request, { 
-        'request':request,
-        'item':item,
-        'filename': item.filename, 
-        'num_files': len(changed_list) + len(unchanged_list),
-        'num_changed': len(changed_list), 
-        'num_unchanged': len(unchanged_list),
-        'changed_list':changed_list,
-        'unchanged_list':unchanged_list,
-        'report_unchanged': settings.REPORT_UNCHANGED,
-        })
-    send_mail(subject=subject, from_email=from_email, recipient_list=recipient_list, message='', html_message=t.render(c), fail_silently=False)
-    return True
+        item_list = []
+        if self._item_id:
+            try:
+                item = FileWatchModel.objects.get(id=self._item_id)
+                if item:
+                    item_list.append(item)
+            except FileWatchModel.DoesNotExist:
+                pass
+        else:
+            item_list = FileWatchModel.objects.all()
+                
+        for item in item_list:
+            result_item = CheckItemHandler.ResultItem(item)
+            if os.path.exists(item.filename):
+                yield 'disk: Scanning %s for files\r\n' % (result_item.filename)
+                if os.path.isdir(item.filename) and item.recursive:
+                    result_item.files_on_disk = _get_files_recursive(item.filename)
+                else:
+                    s = os.stat(item.filename)
+                    result_item.files_on_disk = [ FileWatchItemFromDisk(item.filename, s) ]
+            else:
+                yield 'disk: %s does not exist\r\n' % (result_item.filename)
+            self._result_item_list.append(result_item)
+            yield 'disk: %s found %i files\r\n' % (result_item.filename, len(result_item.files_on_disk))
 
+    def _load_db_files(self):
+        for result_item in self._result_item_list:
+            yield 'database: %s loading files\r\n' % (result_item.filename)
+            try:
+                result_item.files_in_db = FileWatchItemModel.objects.filter(watchid=result_item.id)
+            except FileWatchItemModel.DoesNotExist:
+                pass
+            yield 'database: %s loaded %i files\r\n' % (result_item.filename, len(result_item.files_in_db))
+
+    def _compare_files(self):
+
+        for result_item in self._result_item_list:
+            yield 'compare: %s start\r\n' % (result_item.filename)
+            # expect all files from DB to be found on disk
+            missing_files_from_db = []
+            for db_item in result_item.files_in_db:
+                missing_files_from_db.append(db_item)
+
+            result_item.changed_list = []
+            result_item.unchanged_list = []
+
+            for disk_item in result_item.files_on_disk:
+                found = False
+                for db_item in result_item.files_in_db:
+                    if db_item.filename == disk_item.filename:
+                        found = True
+                        break
+                changes = []
+                if not found:
+                    with transaction.atomic():
+                        model = FileWatchItemModel.objects.create(watchid=result_item.item, 
+                                                                filename=disk_item.filename, 
+                                                                created=disk_item.created,
+                                                                modified=disk_item.modified,
+                                                                uid=disk_item.uid,
+                                                                gid=disk_item.gid,
+                                                                mode=disk_item.mode,
+                                                                size=disk_item.size
+                                                                )
+                    changes.append( 'File added' )
+                    yield 'compare: %s: file %s added\r\n' % (result_item.filename, disk_item.filename)
+                else:
+                    missing_files_from_db.remove(db_item)
+
+                    #logger.error('%s %s, %s' % (disk_item.filename, disk_item.created, as_local_time(disk_item.created)))
+                    #logger.error('%s %s, %s' % (db_item.filename, db_item.created, as_local_time(db_item.created)))
+                    db_item_dirty = False
+                    if disk_item.created != db_item.created:
+                        changes.append( 'Create time changed from %s to %s' % (as_local_time(db_item.created), as_local_time(disk_item.created)) )
+                        db_item.created = disk_item.created
+                        db_item_dirty = True
+                    if disk_item.modified != db_item.modified:
+                        changes.append( 'Modification time changed from %s to %s' % (as_local_time(db_item.modified), as_local_time(disk_item.modified)) )
+                        db_item.modified = disk_item.modified
+                        db_item_dirty = True
+                    if disk_item.uid != db_item.uid:
+                        changes.append( 'Owner changed from %i to %i' % (db_item.uid, disk_item.uid) )
+                        db_item.uid = disk_item.uid
+                        db_item_dirty = True
+                    if disk_item.gid != db_item.gid:
+                        changes.append( 'Group changed from %i to %i' % (db_item.gid, disk_item.gid) )
+                        db_item.gid = disk_item.gid
+                        db_item_dirty = True
+                    if disk_item.mode != db_item.mode:
+                        changes.append( 'Mode changed from %o to %o' % (db_item.mode, disk_item.mode) )
+                        db_item.mode = disk_item.mode
+                        db_item_dirty = True
+                    if disk_item.size != db_item.size:
+                        changes.append( 'Size changed from %o to %o' % (db_item.size, disk_item.size) )
+                        db_item.size = disk_item.size
+                        db_item_dirty = True
+                    if db_item_dirty:
+                        yield 'compare: %s: file %s changed\r\n' % (result_item.filename, disk_item.filename)
+                        with transaction.atomic():
+                            db_item.save()
+                    else:
+                        yield 'compare: %s: file %s unchanged\r\n' % (result_item.filename, disk_item.filename)
+                        result_item.unchanged_list.append( (db_item.filename, []) )
+
+                if changes:
+                    result_item.changed_list.append( (disk_item.filename, changes) )
+            for db_item in missing_files_from_db:
+                changes = ['File deleted']
+                result_item.changed_list.append( (db_item.filename, changes) )
+                with transaction.atomic():
+                    db_item.delete()
+                yield 'compare: %s: file %s deleted\r\n' % (result_item.filename, db_item.filename)
+            yield 'compare: %s done\r\n' % (result_item.filename)
+
+    def _send_email_notifications(self):
+        if not self._notify:
+            yield 'send_notification: skipped\r\n'
+            return
+
+        for result_item in self._result_item_list:
+            if not result_item.changed_list:
+                continue
+            stat_dict = { 
+                        'filename': result_item.filename, 
+                        'num_files': len(result_item.changed_list) + len(result_item.unchanged_list),
+                        'num_changed': len(result_item.changed_list), 
+                        'num_unchanged': len(result_item.unchanged_list) 
+                        }
+            
+            subject = settings.EMAIL_SUBJECT_FORMAT % stat_dict
+            from_email = settings.EMAIL_SENDER
+            recipient_list = result_item.recipient_list
+
+            t = Template(FILEWATCH_CHECK_VIEW_TEMPLATE, name='check view template')
+            c = RequestContext( self._request, { 
+                'request':self._request,
+                'item':result_item.item,
+                'filename': result_item.filename, 
+                'num_files': len(result_item.changed_list) + len(result_item.unchanged_list),
+                'num_changed': len(result_item.changed_list), 
+                'num_unchanged': len(result_item.unchanged_list),
+                'changed_list':result_item.changed_list,
+                'unchanged_list':result_item.unchanged_list,
+                'report_unchanged': settings.REPORT_UNCHANGED,
+                })
+            yield 'send_notification: about to %s sent to %s\r\n' % (result_item.filename, recipient_list)
+            send_mail(subject=subject, from_email=from_email, recipient_list=recipient_list, message='', html_message=t.render(c), fail_silently=False)
+            yield 'send_notification: %s sent to %s\r\n' % (result_item.filename, recipient_list)
+
+    def __iter__(self):
+        for func in self._handler_list:
+            for func_result in func():
+                yield func_result
+
+@transaction.non_atomic_requests
 def check(request):
     
     verbose = _get_request_param(request, 'verbose', 0)
-    
-    response_status = 200
-    response_data = ''
-    changed_list = []
-    unchanged_list = []
-    num_mails_ok = 0
-    num_mails_failed = 0
-    for item in FileWatchModel.objects.all():
-        item_changed_list, item_unchanged_list = _check_item(item)
-        
-        ret = _send_email_notifications(request, item, (item_changed_list, item_unchanged_list) )
-        if ret is not None:
-            if ret:
-                num_mails_ok += 1
-            else:
-                num_mails_failed += 1
-        
-        changed_list.extend(item_changed_list)
-        unchanged_list.extend(item_unchanged_list)
-    if verbose:
-        t = Template(FILEWATCH_CHECK_VIEW_TEMPLATE, name='check view template')
-        c = RequestContext( request, { 
-            'request':request,
-            'num_mails_ok':num_mails_ok,
-            'num_mails_failed':num_mails_failed,
-            'num_files': len(changed_list) + len(unchanged_list),
-            'num_changed': len(changed_list), 
-            'num_unchanged': len(unchanged_list),
-            'changed_list':changed_list,
-            'unchanged_list':unchanged_list,
-            'report_unchanged': settings.REPORT_UNCHANGED,
-            })
-        return HttpResponse(t.render(c), status=response_status)
-    else:
-        return HttpResponse(response_data, status=response_status, content_type="text/plain")        
+    notify = _get_request_param(request, 'notify', 1)
 
+    response_status = 200
+    response = StreamingHttpResponse(streaming_content=CheckItemHandler(request=request, verbose=verbose, notify=notify), 
+                                     status=response_status, content_type="text/plain")
+    return response
 
 FILEWATCH_CHECK_VIEW_TEMPLATE = """
 {% load type %}

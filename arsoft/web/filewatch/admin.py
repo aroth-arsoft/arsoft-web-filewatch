@@ -7,9 +7,9 @@ from django import forms
 from arsoft.web.filewatch.models import FileWatchModel
 
 class FileWatchForm(forms.ModelForm):
-    exclude = []
     class Meta:
         model = FileWatchModel
+        fields = ['filename', 'recursive', 'notify']
 
 class FileWatchAdmin(admin.ModelAdmin):
 
