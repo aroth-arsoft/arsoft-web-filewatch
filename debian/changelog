@@ -1,3 +1,9 @@
+arsoft-web-filewatch (0.3) xenial; urgency=medium
+
+  * build for python3 only
+
+ -- Andreas Roth <aroth@arsoft-online.com>  Fri, 13 May 2016 07:23:26 +0200
+
 arsoft-web-filewatch (0.2) vivid; urgency=medium
 
   * fixed encoding issues
